@@ -262,10 +262,25 @@ def load_data():
     batting_innings = pd.read_csv("batting_innings.csv")
     bowling_innings = pd.read_csv("bowling_innings.csv")
     wicket_types = pd.read_csv("bowler_wicket_types.csv")
-    return batting, bowling, roles, batting_phase, bowling_phase, batting_innings, bowling_innings, wicket_types
+    bowler_dots = pd.read_csv("bowler_dot_ball_pct.csv")
+    batter_dots = pd.read_csv("batter_dot_ball_pct.csv")
+    batter_dismissals = pd.read_csv("batter_dismissal_types.csv")
+    keeper_stumpings = pd.read_csv("keeper_stumpings.csv")
+    batting_h2h = pd.read_csv("batting_head_to_head.csv")
+    bowling_h2h = pd.read_csv("bowling_head_to_head.csv")
+    season_gaps = pd.read_csv("player_season_gaps.csv")
+    try:
+        player_ages = pd.read_csv("player_ages.csv")
+    except FileNotFoundError:
+        player_ages = pd.DataFrame(columns=['Player', 'dob', 'age', 'battingStyles', 'bowlingStyles'])
+    return (batting, bowling, roles, batting_phase, bowling_phase, batting_innings, bowling_innings,
+            wicket_types, bowler_dots, batter_dots, batter_dismissals, keeper_stumpings,
+            batting_h2h, bowling_h2h, season_gaps, player_ages)
 
 try:
-    batting_df, bowling_df, roles_df, batting_phase_df, bowling_phase_df, batting_innings_df, bowling_innings_df, wicket_types_df = load_data()
+    (batting_df, bowling_df, roles_df, batting_phase_df, bowling_phase_df, batting_innings_df, bowling_innings_df,
+     wicket_types_df, bowler_dots_df, batter_dots_df, batter_dismissals_df, keeper_stumpings_df,
+     batting_h2h_df, bowling_h2h_df, season_gaps_df, player_ages_df) = load_data()
     DATA_LOADED = True
 except FileNotFoundError:
     DATA_LOADED = False
@@ -273,6 +288,9 @@ except FileNotFoundError:
 if not DATA_LOADED:
     st.error("Data files not found. Make sure all CSV outputs are in this folder. Run `pipeline.py` then `pipeline_extended.py` first.")
     st.stop()
+
+# Identify which players have at least one stumping — used to surface keeper-specific stats
+KEEPER_PLAYERS = set(keeper_stumpings_df['Keeper'].unique())
 
 # Filter out insufficient-data players from selector — not auction relevant
 eligible_players = roles_df[roles_df['role'] != 'Insufficient data'].copy()
@@ -325,6 +343,10 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**RECENT FORM WINDOW**")
     recent_n = st.slider("Last N seasons", min_value=1, max_value=5, value=3, label_visibility="collapsed")
+    st.caption(
+        f"Compares each player's last **{recent_n} season{'s' if recent_n != 1 else ''}** against their "
+        f"full career — so you can see if they're improving, declining, or holding steady right now."
+    )
 
     st.markdown("---")
     st.caption("DATA: Cricsheet (via GitHub mirror) · 2008–2026 · 295K+ deliveries")
@@ -379,6 +401,35 @@ def career_bowling_summary(bowl_data):
         'economy': economy, 'average': avg,
         'seasons': bowl_data['season'].nunique()
     }
+
+# ── SAMPLE SIZE RELIABILITY ────────────────────────────────────────────────────
+# Career-level stats need a real sample before they mean anything — a single
+# big innings or one expensive over swings small-sample numbers heavily.
+# These thresholds are based on the actual distribution of the dataset
+# (median career length is ~9-11 innings), so they flag genuinely thin samples
+# without flagging the majority of normal players.
+BATTING_RELIABLE_INNINGS = 10
+BOWLING_RELIABLE_INNINGS = 10
+PHASE_RELIABLE_BALLS = 30
+
+def sample_size_flag(innings_count, threshold):
+    """Returns (is_reliable, badge_text, badge_color) for a given innings count."""
+    if innings_count >= threshold:
+        return True, None, None
+    elif innings_count >= max(3, threshold // 2):
+        return False, "⚠️ Limited Sample", GOLD
+    else:
+        return False, "⚠️ Very Small Sample", RED
+
+def phase_sample_flag(balls_in_phase):
+    """Same idea, but for a single phase split (Powerplay/Middle/Death), which
+    has a much smaller sample than the player's full career total."""
+    if balls_in_phase >= PHASE_RELIABLE_BALLS:
+        return True, None, None
+    elif balls_in_phase >= 12:
+        return False, "⚠️ Limited", GOLD
+    else:
+        return False, "⚠️ Too Few Balls", RED
 
 def recent_vs_career(data, n_seasons):
     if data.empty:
@@ -596,12 +647,40 @@ if mode == "Player Card":
     if role in ['Batter', 'All-rounder'] and bat_summary:
         st.subheader("🏏 Batting Profile")
 
+        bat_innings_count = len(batting_innings_df[batting_innings_df['Batter'] == selected_player])
+        is_reliable_bat, sample_badge_bat, sample_color_bat = sample_size_flag(bat_innings_count, BATTING_RELIABLE_INNINGS)
+
+        sample_line = f"<span style='color:var(--muted); font-size:0.85rem;'>{bat_innings_count} career innings</span>"
+        if sample_badge_bat:
+            sample_line += (
+                f" &nbsp; <span class='role-badge' style='background-color:{sample_color_bat}22; "
+                f"color:{sample_color_bat}; border:1px solid {sample_color_bat};'>{sample_badge_bat}</span>"
+            )
+        st.markdown(sample_line, unsafe_allow_html=True)
+
+        if sample_badge_bat:
+            st.caption(
+                "Stats based on a small number of innings — strike rate and average can swing heavily "
+                "with just one or two more games. Treat as an early read, not a settled judgment."
+            )
+
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Career Runs", f"{bat_summary['runs']:,}")
         c2.metric("Strike Rate", bat_summary['strike_rate'])
         c3.metric("Average", bat_summary['average'] if not pd.isna(bat_summary['average']) else "N/A")
         c4.metric("Seasons Played", bat_summary['seasons'])
         c5.metric("4s / 6s", f"{bat_summary['fours']} / {bat_summary['sixes']}")
+
+        batter_dot_row = batter_dots_df[batter_dots_df['Batter'] == selected_player]
+        if not batter_dot_row.empty:
+            bd = batter_dot_row.iloc[0]
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Dot-Ball % Faced", f"{bd['dot_pct']}%",
+                      help="Lower means better at rotating strike and avoiding pressure.")
+            d2.metric("Balls per Boundary", bd['balls_per_boundary'] if pd.notna(bd['balls_per_boundary']) else "N/A",
+                      help="Average balls faced between finding a 4 or 6 — lower means more frequent boundary hitting.")
+            d3.metric("Finishing Rate", f"{bd['finishing_rate_pct']}%",
+                      help="% of innings ended unbeaten — relevant for assessing finisher roles, less so for top-order batters.")
 
         # Recent form
         all_bat, recent_bat = recent_vs_career(bat_data, recent_n)
@@ -688,52 +767,31 @@ if mode == "Player Card":
                                 prow['strike_rate'] if pd.notna(prow['strike_rate']) else "N/A",
                                 help=f"{int(prow['runs'])} runs off {int(prow['balls_faced'])} balls"
                             )
-                            st.caption(
+                            _, phase_badge, phase_badge_color = phase_sample_flag(int(prow['balls_faced']))
+                            caption_text = (
                                 f"🏏 {int(prow['runs'])} runs · 4️⃣ {int(prow['fours'])} · 6️⃣ {int(prow['sixes'])} "
                                 f"· Boundary%: {prow['boundary_pct']}%"
                             )
+                            st.caption(caption_text)
+                            if phase_badge:
+                                st.markdown(
+                                    f"<span class='role-badge' style='background-color:{phase_badge_color}22; "
+                                    f"color:{phase_badge_color}; border:1px solid {phase_badge_color}; "
+                                    f"font-size:0.65rem;'>{phase_badge} ({int(prow['balls_faced'])} balls)</span>",
+                                    unsafe_allow_html=True
+                                )
             with picol:
                 # Where their runs actually come from — phase share of career runs
-                phase_labels_list = bat_phase_career['Phase'].tolist()
                 fig_phase_pie = go.Figure(data=[go.Pie(
-                    labels=phase_labels_list,
+                    labels=bat_phase_career['Phase'],
                     values=bat_phase_career['runs'],
-                    customdata=phase_labels_list,  # guaranteed to come back in the click event,
-                    hole=0.55,                      # unlike 'label'/'legendgroup' which aren't reliable for pies
+                    hole=0.55,
                     marker=dict(colors=['#3B5BA5', GOLD, RED]),
                     textinfo='percent', textfont=dict(color='#fff', size=12)
                 )])
-                style_fig(fig_phase_pie, height=270, title="Run Share by Phase — click a slice to filter ↓")
+                style_fig(fig_phase_pie, height=270, title="Run Share by Phase")
                 fig_phase_pie.update_layout(showlegend=True, legend=dict(orientation='h', y=-0.15))
-                pie_event = st.plotly_chart(
-                    fig_phase_pie, use_container_width=True,
-                    on_select="rerun", selection_mode="points",
-                    key=f"phase_pie_{selected_player}"
-                )
-
-            # Read back which slice (if any) was clicked.
-            clicked_phase = None
-            if pie_event and pie_event.get("selection", {}).get("points"):
-                pt = pie_event["selection"]["points"][0]
-                cd = pt.get("customdata")
-                if cd:
-                    # customdata comes back as a list (it's set per-point as a scalar here, but
-                    # Plotly always wraps point-level customdata in a list), so unwrap it.
-                    clicked_phase = cd[0] if isinstance(cd, list) else cd
-                else:
-                    # Fallback for older Plotly/Streamlit combos that do expose label/legendgroup
-                    clicked_phase = pt.get("label") or pt.get("legendgroup")
-
-            with st.expander("🔧 Debug: raw click event (temporary — remove once confirmed working)"):
-                st.write(pie_event)
-
-            if clicked_phase:
-                fcol1, fcol2 = st.columns([5, 1])
-                with fcol1:
-                    st.caption(f"🔎 Filtered to **{clicked_phase}** — click the same slice again, or press Clear, to reset.")
-                with fcol2:
-                    if st.button("Clear", key=f"clear_phase_{selected_player}"):
-                        st.rerun()
+                st.plotly_chart(fig_phase_pie, use_container_width=True)
 
             # Per-season phase trend chart
             bat_phase_season = batting_phase_df[
@@ -741,11 +799,7 @@ if mode == "Player Card":
             ].copy()
             bat_phase_season['season'] = bat_phase_season['season'].astype(int)
 
-            if clicked_phase:
-                bat_phase_season = bat_phase_season[bat_phase_season['Phase'] == clicked_phase]
-
             if not bat_phase_season.empty:
-                chart_title = f"Strike Rate by Season — {clicked_phase}" if clicked_phase else "Phase-wise Strike Rate by Season"
                 fig_phase = px.line(
                     bat_phase_season.sort_values('season'), x='season', y='strike_rate', color='Phase',
                     markers=True,
@@ -753,7 +807,7 @@ if mode == "Player Card":
                     labels={'strike_rate': 'Strike Rate', 'season': 'Season'}
                 )
                 fig_phase.update_xaxes(dtick=1)
-                style_fig(fig_phase, height=320, title=chart_title)
+                style_fig(fig_phase, height=320, title="Phase-wise Strike Rate by Season")
                 st.plotly_chart(fig_phase, use_container_width=True)
         else:
             st.caption("No phase-level data available for this player.")
@@ -803,15 +857,73 @@ if mode == "Player Card":
         else:
             st.caption("Not enough innings to compute a reliable consistency score.")
 
+        # ── DISMISSAL TYPE BREAKDOWN ────────────────────────────────────────────
+        player_dismissals = batter_dismissals_df[batter_dismissals_df['Batter'] == selected_player]
+        if not player_dismissals.empty:
+            st.markdown("##### How They Get Out")
+            dcol1, dcol2 = st.columns([2, 3])
+            with dcol1:
+                fig_dismissal_pie = go.Figure(data=[go.Pie(
+                    labels=player_dismissals['Kind'].str.title(),
+                    values=player_dismissals['count'],
+                    hole=0.55,
+                    marker=dict(colors=PLAYER_PALETTE),
+                    textinfo='percent', textfont=dict(color='#fff', size=11)
+                )])
+                style_fig(fig_dismissal_pie, height=280, title="Dismissal Types (Career)")
+                fig_dismissal_pie.update_layout(showlegend=True, legend=dict(orientation='h', y=-0.2, font=dict(size=9)))
+                st.plotly_chart(fig_dismissal_pie, use_container_width=True)
+            with dcol2:
+                top_dismissal = player_dismissals.loc[player_dismissals['count'].idxmax()]
+                st.caption(
+                    f"Most common dismissal: **{top_dismissal['Kind'].title()}** ({int(top_dismissal['count'])} times). "
+                    f"A heavy lean toward bowled/lbw can suggest vulnerability to full, straight bowling. "
+                    f"A heavy lean toward caught is normal for aggressive players and doesn't on its own indicate a weakness."
+                )
+
+        # ── WICKET-KEEPER STUMPINGS ──────────────────────────────────────────────
+        # Only shown for players who have at least one recorded stumping — this is
+        # the only keeping stat reliably attributable to a specific player in this
+        # dataset (catches/byes can't be separated from general fielding).
+        if selected_player in KEEPER_PLAYERS:
+            keeper_row = keeper_stumpings_df[keeper_stumpings_df['Keeper'] == selected_player]
+            if not keeper_row.empty:
+                st.markdown("##### 🧤 Wicket-Keeping")
+                st.metric("Career Stumpings", int(keeper_row.iloc[0]['stumpings']),
+                          help="The only keeping stat reliably attributable to a specific player in this dataset — "
+                               "catches and byes can't be separated from general fielding.")
+
     # ── BOWLING SECTION ──────────────────────────────────────────────────────
     if role in ['Bowler', 'All-rounder'] and bowl_summary:
         st.subheader("🎯 Bowling Profile")
 
-        c1, c2, c3, c4 = st.columns(4)
+        bowl_innings_count = len(bowling_innings_df[bowling_innings_df['Bowler'] == selected_player])
+        is_reliable_bowl, sample_badge_bowl, sample_color_bowl = sample_size_flag(bowl_innings_count, BOWLING_RELIABLE_INNINGS)
+
+        sample_line_b = f"<span style='color:var(--muted); font-size:0.85rem;'>{bowl_innings_count} career innings (bowled 1+ over)</span>"
+        if sample_badge_bowl:
+            sample_line_b += (
+                f" &nbsp; <span class='role-badge' style='background-color:{sample_color_bowl}22; "
+                f"color:{sample_color_bowl}; border:1px solid {sample_color_bowl};'>{sample_badge_bowl}</span>"
+            )
+        st.markdown(sample_line_b, unsafe_allow_html=True)
+
+        if sample_badge_bowl:
+            st.caption(
+                "Stats based on a small number of innings — one expensive over or one great spell can "
+                "swing economy and average heavily. Treat as an early read, not a settled judgment."
+            )
+
+        bowler_dot_row = bowler_dots_df[bowler_dots_df['Bowler'] == selected_player]
+        bowler_dot_pct = bowler_dot_row.iloc[0]['dot_pct'] if not bowler_dot_row.empty else None
+
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Career Wickets", bowl_summary['wickets'])
         c2.metric("Economy Rate", bowl_summary['economy'])
         c3.metric("Bowling Average", bowl_summary['average'] if not pd.isna(bowl_summary['average']) else "N/A")
         c4.metric("Seasons Played", bowl_summary['seasons'])
+        c5.metric("Dot-Ball %", f"{bowler_dot_pct}%" if bowler_dot_pct is not None else "N/A",
+                  help="Deliveries with zero runs conceded — higher means tighter, more pressure-building bowling.")
 
         all_bowl, recent_bowl = recent_vs_career(bowl_data, recent_n)
         if recent_bowl is not None and not recent_bowl.empty:
@@ -895,6 +1007,15 @@ if mode == "Player Card":
                                 prow['economy'] if pd.notna(prow['economy']) else "N/A",
                                 help=f"{int(prow['runs_conceded'])} runs off {prow['overs']:.1f} overs"
                             )
+                            phase_balls = int(round(prow['overs'] * 6))
+                            _, phase_badge_b, phase_badge_color_b = phase_sample_flag(phase_balls)
+                            if phase_badge_b:
+                                st.markdown(
+                                    f"<span class='role-badge' style='background-color:{phase_badge_color_b}22; "
+                                    f"color:{phase_badge_color_b}; border:1px solid {phase_badge_color_b}; "
+                                    f"font-size:0.65rem;'>{phase_badge_b} ({phase_balls} balls)</span>",
+                                    unsafe_allow_html=True
+                                )
             with bpicol:
                 # Where overs are bowled — phase share of total overs bowled
                 fig_overs_pie = go.Figure(data=[go.Pie(
@@ -974,6 +1095,81 @@ if mode == "Player Card":
     if not bat_summary and not bowl_summary:
         st.warning("No sufficient data available for this player.")
 
+    # ════════════════════════════════════════════════════════════════════════
+    # DURABILITY — age + season-gap detection
+    # ════════════════════════════════════════════════════════════════════════
+    if bat_summary or bowl_summary:
+        st.markdown("---")
+        st.subheader("🩺 Durability")
+
+        age_row = player_ages_df[player_ages_df['Player'] == selected_player]
+        gap_row = season_gaps_df[season_gaps_df['Player'] == selected_player]
+        has_age = not age_row.empty and pd.notna(age_row.iloc[0]['age'])
+
+        dur_col1, dur_col2 = st.columns(2)
+
+        with dur_col1:
+            if has_age:
+                st.metric("Age", f"{age_row.iloc[0]['age']:.0f}")
+            else:
+                st.markdown(
+                    "<div style='padding:14px; background:var(--card); border:1px solid var(--line); "
+                    "border-top:3px solid var(--muted); border-radius:4px; height:100%;'>"
+                    "<span style='font-size:0.62rem; color:var(--muted); letter-spacing:0.1em; "
+                    "text-transform:uppercase;'>Age</span><br>"
+                    "<span style='font-size:0.95rem; color:var(--muted);'>Not tracked for this player</span>"
+                    "</div>",
+                    unsafe_allow_html=True
+                )
+
+        with dur_col2:
+            if not gap_row.empty:
+                g = gap_row.iloc[0]
+                span_years = g['latest_season'] - g['debut_season']
+                st.metric("Seasons Missed", int(g['missed_count']),
+                          help=f"Active span: {int(g['debut_season'])}–{int(g['latest_season'])}")
+
+                # Only treat this as a meaningful signal if they have a real, sustained career —
+                # a single early appearance followed by years away isn't "missing seasons,"
+                # it's just a player who barely featured. Gate the warning accordingly.
+                if span_years >= 5 and g['missed_count'] >= 2:
+                    missed_list = str(g['missed_seasons']).replace(',', ', ')
+                    st.caption(
+                        f"⚠️ Missed seasons: {missed_list}. Could reflect injury, being dropped, "
+                        f"or overseas/international scheduling conflicts — worth checking before committing a big bid."
+                    )
+                elif span_years < 5:
+                    st.caption("Career span too short to read missed-season patterns reliably yet.")
+            else:
+                st.caption("No season history available.")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # HEAD-TO-HEAD vs SPECIFIC TEAMS
+    # ════════════════════════════════════════════════════════════════════════
+    if bat_summary or bowl_summary:
+        st.markdown("---")
+        st.subheader("⚔️ Head-to-Head vs Opposition")
+
+        if role in ['Batter', 'All-rounder'] and bat_summary:
+            player_bat_h2h = batting_h2h_df[batting_h2h_df['Batter'] == selected_player].sort_values('runs', ascending=False)
+            if not player_bat_h2h.empty:
+                st.markdown("**Batting — by opponent**")
+                h2h_display = player_bat_h2h[['Opponent', 'runs', 'balls_faced', 'innings', 'strike_rate']].rename(
+                    columns={'runs': 'Runs', 'balls_faced': 'Balls', 'innings': 'Innings', 'strike_rate': 'SR'}
+                )
+                st.dataframe(h2h_display, use_container_width=True, hide_index=True)
+                st.caption("Small innings counts against a specific team can swing strike rate sharply — check the Innings column before drawing conclusions.")
+
+        if role in ['Bowler', 'All-rounder'] and bowl_summary:
+            player_bowl_h2h = bowling_h2h_df[bowling_h2h_df['Bowler'] == selected_player].sort_values('wickets', ascending=False)
+            if not player_bowl_h2h.empty:
+                st.markdown("**Bowling — by opponent**")
+                h2h_display_b = player_bowl_h2h[['Opponent', 'wickets', 'overs', 'economy']].rename(
+                    columns={'wickets': 'Wickets', 'overs': 'Overs'}
+                )
+                st.dataframe(h2h_display_b, use_container_width=True, hide_index=True)
+                st.caption("Small overs counts against a specific team can swing economy sharply — check the Overs column before drawing conclusions.")
+
 
 # ════════════════════════════════════════════════════════════════════════════
 # MAIN — COMPARE PLAYERS MODE
@@ -998,16 +1194,69 @@ elif mode == "Compare Players":
         _, recent_bat = recent_vs_career(bat, recent_n) if not bat.empty else (None, None)
         _, recent_bowl = recent_vs_career(bowl, recent_n) if not bowl.empty else (None, None)
 
-        recent_sr = round((recent_bat['runs'].sum() / recent_bat['balls_faced'].sum()) * 100, 2) \
-            if recent_bat is not None and not recent_bat.empty and recent_bat['balls_faced'].sum() > 0 else None
-        recent_econ = round(recent_bowl['runs_conceded'].sum() / recent_bowl['overs'].sum(), 2) \
-            if recent_bowl is not None and not recent_bowl.empty and recent_bowl['overs'].sum() > 0 else None
+        # Full recent-window summary (not just SR/Economy) — this is what the
+        # main metric cards now display, since the slider should move the
+        # headline numbers, not just a small caption underneath them.
+        recent_bat_sum = None
+        if recent_bat is not None and not recent_bat.empty:
+            recent_bat_sum = career_batting_summary(recent_bat)
+
+        recent_bowl_sum = None
+        if recent_bowl is not None and not recent_bowl.empty:
+            recent_bowl_sum = career_bowling_summary(recent_bowl)
+
+        recent_sr = recent_bat_sum['strike_rate'] if recent_bat_sum else None
+        recent_econ = recent_bowl_sum['economy'] if recent_bowl_sum else None
+
+        # Sample-size badge now reflects the RECENT window's innings count, since
+        # that's the number actually driving the cards a coach is looking at —
+        # a player can have a deep career but a thin recent sample, and that's
+        # exactly the case worth flagging here.
+        bat_innings_n = len(batting_innings_df[batting_innings_df['Batter'] == p])
+        bowl_innings_n = len(bowling_innings_df[bowling_innings_df['Bowler'] == p])
+
+        player_bat_innings = batting_innings_df[batting_innings_df['Batter'] == p]
+        player_bowl_innings = bowling_innings_df[bowling_innings_df['Bowler'] == p]
+
+        if not player_bat_innings.empty:
+            bat_all_seasons = sorted(player_bat_innings['season'].unique())
+            bat_recent_seasons = bat_all_seasons[-recent_n:] if len(bat_all_seasons) >= recent_n else bat_all_seasons
+            recent_bat_innings_n = len(player_bat_innings[player_bat_innings['season'].isin(bat_recent_seasons)])
+        else:
+            recent_bat_innings_n = 0
+
+        if not player_bowl_innings.empty:
+            bowl_all_seasons = sorted(player_bowl_innings['season'].unique())
+            bowl_recent_seasons = bowl_all_seasons[-recent_n:] if len(bowl_all_seasons) >= recent_n else bowl_all_seasons
+            recent_bowl_innings_n = len(player_bowl_innings[player_bowl_innings['season'].isin(bowl_recent_seasons)])
+        else:
+            recent_bowl_innings_n = 0
+
+        _, bat_sample_badge, bat_sample_color = sample_size_flag(recent_bat_innings_n, BATTING_RELIABLE_INNINGS)
+        _, bowl_sample_badge, bowl_sample_color = sample_size_flag(recent_bowl_innings_n, BOWLING_RELIABLE_INNINGS)
+
+        # Durability — age + season-gap lookup (same data as Player Card)
+        age_row_cmp = player_ages_df[player_ages_df['Player'] == p]
+        player_age = age_row_cmp.iloc[0]['age'] if not age_row_cmp.empty and pd.notna(age_row_cmp.iloc[0]['age']) else None
+
+        gap_row_cmp = season_gaps_df[season_gaps_df['Player'] == p]
+        missed_seasons_n, career_span_yrs = None, None
+        if not gap_row_cmp.empty:
+            g_cmp = gap_row_cmp.iloc[0]
+            career_span_yrs = g_cmp['latest_season'] - g_cmp['debut_season']
+            missed_seasons_n = int(g_cmp['missed_count']) if career_span_yrs >= 5 else None
 
         compare_data.append({
             'player': p, 'role': role,
             'bat_data': bat, 'bowl_data': bowl,
             'bat_summary': bat_sum, 'bowl_summary': bowl_sum,
-            'recent_sr': recent_sr, 'recent_econ': recent_econ
+            'recent_bat_summary': recent_bat_sum, 'recent_bowl_summary': recent_bowl_sum,
+            'recent_sr': recent_sr, 'recent_econ': recent_econ,
+            'bat_innings_n': recent_bat_innings_n, 'bowl_innings_n': recent_bowl_innings_n,
+            'bat_innings_n_career': bat_innings_n, 'bowl_innings_n_career': bowl_innings_n,
+            'bat_sample_badge': bat_sample_badge, 'bat_sample_color': bat_sample_color,
+            'bowl_sample_badge': bowl_sample_badge, 'bowl_sample_color': bowl_sample_color,
+            'age': player_age, 'missed_seasons_n': missed_seasons_n, 'career_span_yrs': career_span_yrs
         })
 
     # ── SIDE-BY-SIDE PLAYER CARDS ─────────────────────────────────────────────
@@ -1027,26 +1276,78 @@ elif mode == "Compare Players":
             )
             st.markdown("<br>", unsafe_allow_html=True)
 
-            if pdata['bat_summary']:
+            if pdata['role'] in ['Batter', 'All-rounder'] and pdata['bat_summary']:
                 bs = pdata['bat_summary']
-                st.metric("Career Runs", f"{bs['runs']:,}")
-                st.metric("Strike Rate", bs['strike_rate'])
-                st.metric("Average", bs['average'] if not pd.isna(bs['average']) else "N/A")
-                if pdata['recent_sr'] is not None:
-                    delta = round(pdata['recent_sr'] - bs['strike_rate'], 1)
-                    st.caption(f"Last {recent_n}s SR: {pdata['recent_sr']} ({'▲' if delta>=0 else '▼'}{abs(delta)})")
+                rbs = pdata['recent_bat_summary']
 
-            if pdata['bowl_summary']:
+                if rbs:
+                    st.metric(f"Runs (Last {recent_n}s)", f"{rbs['runs']:,}")
+                    st.metric(f"Strike Rate (Last {recent_n}s)", rbs['strike_rate'],
+                              delta=round(rbs['strike_rate'] - bs['strike_rate'], 1))
+                    st.metric(f"Average (Last {recent_n}s)", rbs['average'] if not pd.isna(rbs['average']) else "N/A")
+                    st.caption(f"Career: {bs['runs']:,} runs, SR {bs['strike_rate']}, Avg {bs['average'] if not pd.isna(bs['average']) else 'N/A'}")
+                else:
+                    st.metric("Career Runs", f"{bs['runs']:,}")
+                    st.metric("Strike Rate", bs['strike_rate'])
+                    st.metric("Average", bs['average'] if not pd.isna(bs['average']) else "N/A")
+                    st.caption(f"No innings in the last {recent_n} seasons — showing career figures.")
+
+                st.caption(f"{pdata['bat_innings_n']} innings in this window ({pdata['bat_innings_n_career']} career)")
+                if pdata['bat_sample_badge']:
+                    st.markdown(
+                        f"<span class='role-badge' style='background-color:{pdata['bat_sample_color']}22; "
+                        f"color:{pdata['bat_sample_color']}; border:1px solid {pdata['bat_sample_color']}; "
+                        f"font-size:0.65rem;'>{pdata['bat_sample_badge']}</span>",
+                        unsafe_allow_html=True
+                    )
+
+            if pdata['role'] in ['Bowler', 'All-rounder'] and pdata['bowl_summary']:
                 bws = pdata['bowl_summary']
-                st.metric("Career Wickets", bws['wickets'])
-                st.metric("Economy", bws['economy'])
-                st.metric("Bowl Avg", bws['average'] if not pd.isna(bws['average']) else "N/A")
-                if pdata['recent_econ'] is not None:
-                    delta = round(pdata['recent_econ'] - bws['economy'], 1)
-                    st.caption(f"Last {recent_n}s Econ: {pdata['recent_econ']} ({'▲' if delta>=0 else '▼'}{abs(delta)})")
+                rbws = pdata['recent_bowl_summary']
+
+                if rbws:
+                    st.metric(f"Wickets (Last {recent_n}s)", rbws['wickets'])
+                    st.metric(f"Economy (Last {recent_n}s)", rbws['economy'],
+                              delta=round(rbws['economy'] - bws['economy'], 1), delta_color="inverse")
+                    st.metric(f"Bowl Avg (Last {recent_n}s)", rbws['average'] if not pd.isna(rbws['average']) else "N/A")
+                    st.caption(f"Career: {bws['wickets']} wkts, Econ {bws['economy']}, Avg {bws['average'] if not pd.isna(bws['average']) else 'N/A'}")
+                else:
+                    st.metric("Career Wickets", bws['wickets'])
+                    st.metric("Economy", bws['economy'])
+                    st.metric("Bowl Avg", bws['average'] if not pd.isna(bws['average']) else "N/A")
+                    st.caption(f"No overs in the last {recent_n} seasons — showing career figures.")
+
+                st.caption(f"{pdata['bowl_innings_n']} innings in this window ({pdata['bowl_innings_n_career']} career, 1+ over)")
+                if pdata['bowl_sample_badge']:
+                    st.markdown(
+                        f"<span class='role-badge' style='background-color:{pdata['bowl_sample_color']}22; "
+                        f"color:{pdata['bowl_sample_color']}; border:1px solid {pdata['bowl_sample_color']}; "
+                        f"font-size:0.65rem;'>{pdata['bowl_sample_badge']}</span>",
+                        unsafe_allow_html=True
+                    )
 
             if not pdata['bat_summary'] and not pdata['bowl_summary']:
                 st.warning("No data")
+
+            # ── Durability — age + season-gap, same data as Player Card ────────
+            if pdata['age'] is not None or pdata['missed_seasons_n'] is not None:
+                st.markdown(
+                    "<div style='border-top:1px solid var(--line); margin-top:8px; padding-top:8px;'>"
+                    "<span style='font-size:0.7rem; color:var(--muted); text-transform:uppercase; "
+                    "letter-spacing:0.05em;'>🩺 Durability</span></div>",
+                    unsafe_allow_html=True
+                )
+                dcol1, dcol2 = st.columns(2)
+                with dcol1:
+                    if pdata['age'] is not None:
+                        st.metric("Age", f"{pdata['age']:.0f}")
+                    else:
+                        st.caption("Age not tracked for this player.")
+                with dcol2:
+                    if pdata['missed_seasons_n'] is not None:
+                        st.metric("Missed Seasons", pdata['missed_seasons_n'])
+                    else:
+                        st.caption("Career span too short to assess.")
 
             already_in = pdata['player'] in st.session_state.shortlist
             if already_in:
@@ -1059,14 +1360,20 @@ elif mode == "Compare Players":
     st.markdown("---")
 
     # ── COMPARISON CHARTS ──────────────────────────────────────────────────────
-    has_batters = any(p['bat_summary'] for p in compare_data)
-    has_bowlers = any(p['bowl_summary'] for p in compare_data)
+    has_batters = any(p['role'] in ['Batter', 'All-rounder'] and p['bat_summary'] for p in compare_data)
+    has_bowlers = any(p['role'] in ['Bowler', 'All-rounder'] and p['bowl_summary'] for p in compare_data)
 
-    if has_batters:
+    if not has_batters:
+        st.caption(
+            f"📋 No batting record for the selected player(s) — "
+            f"{', '.join(p['player'] for p in compare_data)} {'have' if len(compare_data) > 1 else 'has'} "
+            f"no batting history to chart here."
+        )
+    else:
         st.subheader("🏏 Strike Rate Trend — Batting")
         fig_cmp_bat = go.Figure()
         for i, pdata in enumerate(compare_data):
-            if not pdata['bat_data'].empty:
+            if pdata['role'] in ['Batter', 'All-rounder'] and not pdata['bat_data'].empty:
                 color = PLAYER_COLORS[i % len(PLAYER_COLORS)]
                 fig_cmp_bat.add_trace(go.Scatter(
                     x=pdata['bat_data']['season'], y=pdata['bat_data']['strike_rate'],
@@ -1081,7 +1388,7 @@ elif mode == "Compare Players":
         # Grouped bar — career batting metrics side by side
         bat_compare_rows = []
         for pdata in compare_data:
-            if pdata['bat_summary']:
+            if pdata['role'] in ['Batter', 'All-rounder'] and pdata['bat_summary']:
                 bat_compare_rows.append({
                     'Player': pdata['player'],
                     'Runs': pdata['bat_summary']['runs'],
@@ -1109,7 +1416,7 @@ elif mode == "Compare Players":
 
         phase_rows = []
         for pdata in compare_data:
-            if pdata['bat_summary']:
+            if pdata['role'] in ['Batter', 'All-rounder'] and pdata['bat_summary']:
                 prow = batting_phase_df[
                     (batting_phase_df['Batter'] == pdata['player']) &
                     (batting_phase_df['season'] == 'Career') &
@@ -1154,10 +1461,18 @@ elif mode == "Compare Players":
             st.dataframe(phase_cmp_df, use_container_width=True, hide_index=True)
         else:
             st.caption("No phase data available for selected players.")
+
+    if not has_bowlers:
+        st.caption(
+            f"🎯 No bowling record for the selected player(s) — "
+            f"{', '.join(p['player'] for p in compare_data)} {'have' if len(compare_data) > 1 else 'has'} "
+            f"no bowling history to chart here."
+        )
+    else:
         st.subheader("🎯 Economy Trend — Bowling")
         fig_cmp_bowl = go.Figure()
         for i, pdata in enumerate(compare_data):
-            if not pdata['bowl_data'].empty:
+            if pdata['role'] in ['Bowler', 'All-rounder'] and not pdata['bowl_data'].empty:
                 color = PLAYER_COLORS[i % len(PLAYER_COLORS)]
                 fig_cmp_bowl.add_trace(go.Scatter(
                     x=pdata['bowl_data']['season'], y=pdata['bowl_data']['economy'],
@@ -1171,7 +1486,7 @@ elif mode == "Compare Players":
 
         bowl_compare_rows = []
         for pdata in compare_data:
-            if pdata['bowl_summary']:
+            if pdata['role'] in ['Bowler', 'All-rounder'] and pdata['bowl_summary']:
                 bowl_compare_rows.append({
                     'Player': pdata['player'],
                     'Wickets': pdata['bowl_summary']['wickets'],
@@ -1189,16 +1504,52 @@ elif mode == "Compare Players":
             fig_bowl_bars.update_layout(showlegend=False)
             st.plotly_chart(fig_bowl_bars, use_container_width=True)
 
+    # ── HEAD-TO-HEAD vs SPECIFIC OPPONENT ───────────────────────────────────────
+    st.markdown("---")
+    st.subheader("⚔️ Head-to-Head vs a Specific Team")
+    st.caption("Pick an opponent to see how each shortlisted player has performed specifically against that team — useful when building a squad with a particular rival in mind.")
+
+    all_opponents = sorted(set(batting_h2h_df['Opponent'].unique()) | set(bowling_h2h_df['Opponent'].unique()))
+    selected_opponent = st.selectbox("Compare vs:", options=all_opponents, key="h2h_opponent_select")
+
+    h2h_cols = st.columns(len(compare_data))
+    for i, (col, pdata) in enumerate(zip(h2h_cols, compare_data)):
+        color = PLAYER_COLORS[i % len(PLAYER_COLORS)]
+        with col:
+            st.markdown(f"<span style='color:{color}; font-weight:600;'>{pdata['player']}</span>", unsafe_allow_html=True)
+
+            shown_any = False
+            if pdata['role'] in ['Batter', 'All-rounder']:
+                row = batting_h2h_df[(batting_h2h_df['Batter'] == pdata['player']) & (batting_h2h_df['Opponent'] == selected_opponent)]
+                if not row.empty:
+                    r = row.iloc[0]
+                    st.metric("Runs vs them", int(r['runs']))
+                    st.metric("SR vs them", r['strike_rate'])
+                    st.caption(f"{int(r['innings'])} innings, {int(r['balls_faced'])} balls")
+                    shown_any = True
+
+            if pdata['role'] in ['Bowler', 'All-rounder']:
+                row_b = bowling_h2h_df[(bowling_h2h_df['Bowler'] == pdata['player']) & (bowling_h2h_df['Opponent'] == selected_opponent)]
+                if not row_b.empty:
+                    r_b = row_b.iloc[0]
+                    st.metric("Wickets vs them", int(r_b['wickets']))
+                    st.metric("Economy vs them", r_b['economy'])
+                    st.caption(f"{r_b['overs']:.1f} overs bowled")
+                    shown_any = True
+
+            if not shown_any:
+                st.caption(f"No record vs {selected_opponent}.")
+
     # ── FULL COMPARISON TABLE ──────────────────────────────────────────────────
     with st.expander("📋 Full Side-by-Side Summary Table"):
         summary_rows = []
         for pdata in compare_data:
             row = {'Player': pdata['player'], 'Role': pdata['role']}
-            if pdata['bat_summary']:
+            if pdata['role'] in ['Batter', 'All-rounder'] and pdata['bat_summary']:
                 bs = pdata['bat_summary']
                 row.update({'Runs': bs['runs'], 'Bat SR': bs['strike_rate'],
                             'Bat Avg': bs['average'], '4s': bs['fours'], '6s': bs['sixes']})
-            if pdata['bowl_summary']:
+            if pdata['role'] in ['Bowler', 'All-rounder'] and pdata['bowl_summary']:
                 bws = pdata['bowl_summary']
                 row.update({'Wickets': bws['wickets'], 'Economy': bws['economy'], 'Bowl Avg': bws['average']})
             summary_rows.append(row)
@@ -1253,18 +1604,28 @@ else:
                 'Runs': bat_sum['runs'], 'Bat SR': bat_sum['strike_rate'],
                 'Bat Avg': bat_sum['average'], 'Recent SR': recent_sr,
                 '4s': bat_sum['fours'], '6s': bat_sum['sixes'],
-                'Boundary %': bat_sum['boundary_pct']
+                'Boundary %': bat_sum['boundary_pct'],
+                'Bat Innings': len(innings_bat)
             })
         if role in ['Bowler', 'All-rounder'] and bowl_sum:
             row.update({
                 'Wickets': bowl_sum['wickets'], 'Economy': bowl_sum['economy'],
-                'Bowl Avg': bowl_sum['average'], 'Recent Econ': recent_econ
+                'Bowl Avg': bowl_sum['average'], 'Recent Econ': recent_econ,
+                'Bowl Innings': len(innings_bowl)
             })
         if cv_bat is not None and role in ['Batter', 'All-rounder']:
             row['Consistency (CV%)'] = cv_bat
 
+        bat_reliable, bat_badge, bat_badge_color = sample_size_flag(len(innings_bat), BATTING_RELIABLE_INNINGS)
+        bowl_reliable, bowl_badge, bowl_badge_color = sample_size_flag(len(innings_bowl), BOWLING_RELIABLE_INNINGS)
+
         shortlist_rows.append(row)
-        shortlist_raw[p] = {'role': role, 'bat_sum': bat_sum, 'bowl_sum': bowl_sum}
+        shortlist_raw[p] = {
+            'role': role, 'bat_sum': bat_sum, 'bowl_sum': bowl_sum,
+            'bat_innings_n': len(innings_bat), 'bowl_innings_n': len(innings_bowl),
+            'bat_badge': bat_badge, 'bat_badge_color': bat_badge_color,
+            'bowl_badge': bowl_badge, 'bowl_badge_color': bowl_badge_color
+        }
 
     shortlist_df = pd.DataFrame(shortlist_rows)
 
@@ -1278,14 +1639,28 @@ else:
             badge_color = ROLE_COLORS.get(r['role'], '#888')
             line = f"**{p}** "
             if r['role'] in ['Batter', 'All-rounder'] and r['bat_sum']:
-                line += f"· {r['bat_sum']['runs']:,} runs, SR {r['bat_sum']['strike_rate']} "
+                line += f"· {r['bat_sum']['runs']:,} runs, SR {r['bat_sum']['strike_rate']} ({r['bat_innings_n']} inn) "
             if r['role'] in ['Bowler', 'All-rounder'] and r['bowl_sum']:
-                line += f"· {r['bowl_sum']['wickets']} wkts, Econ {r['bowl_sum']['economy']} "
-            st.markdown(
+                line += f"· {r['bowl_sum']['wickets']} wkts, Econ {r['bowl_sum']['economy']} ({r['bowl_innings_n']} inn) "
+
+            badges_html = (
                 f"<span class='role-badge' style='background-color:{badge_color}22; color:{badge_color}; "
-                f"border:1px solid {badge_color}; margin-right:8px;'>{r['role']}</span> {line}",
-                unsafe_allow_html=True
+                f"border:1px solid {badge_color}; margin-right:8px;'>{r['role']}</span>"
             )
+            if r.get('bat_badge'):
+                badges_html += (
+                    f" <span class='role-badge' style='background-color:{r['bat_badge_color']}22; "
+                    f"color:{r['bat_badge_color']}; border:1px solid {r['bat_badge_color']}; "
+                    f"font-size:0.65rem;'>Bat: {r['bat_badge']}</span>"
+                )
+            if r.get('bowl_badge'):
+                badges_html += (
+                    f" <span class='role-badge' style='background-color:{r['bowl_badge_color']}22; "
+                    f"color:{r['bowl_badge_color']}; border:1px solid {r['bowl_badge_color']}; "
+                    f"font-size:0.65rem;'>Bowl: {r['bowl_badge']}</span>"
+                )
+
+            st.markdown(f"{badges_html} {line}", unsafe_allow_html=True)
         with rcol2:
             if st.button("✕ Remove", key=f"remove_{p}"):
                 remove_from_shortlist(p)
@@ -1314,6 +1689,17 @@ else:
     # ── RADAR CHART — normalized comparison across shortlisted players ─────────
     st.subheader("📊 Shortlist Radar Comparison")
     st.caption("Each metric is normalized 0–100 relative to the players on this shortlist, so batting and bowling stats can sit on the same chart.")
+
+    thin_sample_players = [
+        p for p in shortlist
+        if shortlist_raw[p].get('bat_badge') or shortlist_raw[p].get('bowl_badge')
+    ]
+    if thin_sample_players:
+        st.warning(
+            f"⚠️ **{', '.join(thin_sample_players)}** have a small sample size (see badges above). "
+            f"Their position on this radar reflects limited data and may shift significantly as they play more matches — "
+            f"don't read it the same way as a player with a full career sample."
+        )
 
     if len(shortlist) < 2:
         st.info("Add at least 2 players to see the radar comparison.")
