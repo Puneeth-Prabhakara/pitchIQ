@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="IPL Player Auction Analytics",
+    page_title="ScoutLens — IPL Auction Analytics",
     page_icon="🏏",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -310,7 +310,7 @@ def remove_from_shortlist(player_name):
 
 # ── SIDEBAR ────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🏏 IPL AUCTION INTEL")
+    st.markdown("##  ScoutLens 🔎")
     st.markdown("---")
 
     st.markdown("**SELECT MODE**")
@@ -332,12 +332,40 @@ with st.sidebar:
 
     if mode == "Player Card":
         st.markdown("**SELECT PLAYER**")
-        selected_player = st.selectbox("Player", options=player_list, label_visibility="collapsed")
+        # If the role filter just shrank the list and the previously-selected
+        # player is no longer valid, Streamlit will raise on the stale
+        # session-state value — clear it so the widget falls back cleanly.
+        if "selected_player_widget" in st.session_state and st.session_state["selected_player_widget"] not in player_list:
+            del st.session_state["selected_player_widget"]
+        # Seed an initial value only the very first time this key is ever
+        # created — after that, `key` alone is the source of truth, so we
+        # must NOT pass `index=`/recompute a default on every run, or
+        # Streamlit can re-resolve it fresh whenever this widget's position
+        # in the render tree changes (e.g. switching modes via the if/else).
+        if "selected_player_widget" not in st.session_state and player_list:
+            st.session_state["selected_player_widget"] = player_list[0]
+        selected_player = st.selectbox(
+            "Player", options=player_list,
+            label_visibility="collapsed", key="selected_player_widget"
+        )
     else:
         st.markdown("**SELECT PLAYERS (2-4)**")
+        # Same defensive cleanup for the multiselect — drop any previously
+        # selected players who've fallen out of the current role filter,
+        # rather than letting Streamlit raise on a stale selection.
+        if "selected_players_compare_widget" in st.session_state:
+            valid_prior = [p for p in st.session_state["selected_players_compare_widget"] if p in player_list]
+            if valid_prior != st.session_state["selected_players_compare_widget"]:
+                st.session_state["selected_players_compare_widget"] = valid_prior
+        # Seed only once — never pass `default=` alongside `key` on every
+        # run, since that's what was silently resetting the selection back
+        # to "first 2 players alphabetically" whenever this widget's branch
+        # changed position (switching away from and back to Compare mode).
+        if "selected_players_compare_widget" not in st.session_state:
+            st.session_state["selected_players_compare_widget"] = player_list[:2] if len(player_list) >= 2 else player_list
         selected_players_compare = st.multiselect(
-            "Players", options=player_list, default=player_list[:2] if len(player_list) >= 2 else player_list,
-            label_visibility="collapsed", max_selections=4
+            "Players", options=player_list,
+            label_visibility="collapsed", max_selections=4, key="selected_players_compare_widget"
         )
 
     st.markdown("---")
@@ -345,7 +373,7 @@ with st.sidebar:
     recent_n = st.slider("Last N seasons", min_value=1, max_value=5, value=3, label_visibility="collapsed")
     st.caption(
         f"Compares each player's last **{recent_n} season{'s' if recent_n != 1 else ''}** against their "
-        f"full career — so you can see if they're improving, declining, or holding steady right now."
+        f"full career - so you can see if they're improving, declining, or holding steady right now."
     )
 
     st.markdown("---")
@@ -542,7 +570,8 @@ def generate_scouting_summary(player_name, role, bat_sum, bowl_sum, bat_phase_ca
 # ════════════════════════════════════════════════════════════════════════════
 # MAIN — PLAYER CARD MODE
 # ════════════════════════════════════════════════════════════════════════════
-st.title("🏏 IPL Player Auction Analytics")
+st.title(" SCOUTLENS")
+st.caption("Indian Premier League Player Auction Analytics")
 
 if mode == "Player Card":
 
@@ -684,7 +713,7 @@ if mode == "Player Card":
 
         # Recent form
         all_bat, recent_bat = recent_vs_career(bat_data, recent_n)
-        if recent_bat is not None and not recent_bat.empty:
+        if recent_bat is not None and not recent_bat.empty and recent_bat['balls_faced'].sum() > 0:
             recent_sr = round((recent_bat['runs'].sum() / recent_bat['balls_faced'].sum()) * 100, 2)
             recent_runs = int(recent_bat['runs'].sum())
             delta_sr = round(recent_sr - bat_summary['strike_rate'], 2)
@@ -827,7 +856,7 @@ if mode == "Player Card":
                 coach_lines = {
                     "Reliable": f"Scores around {int(mean_runs)} most innings — a dependable, low-risk pick.",
                     "Up & Down": f"Averages {int(mean_runs)}, but swings between quiet games and big scores.",
-                    "Boom-or-Bust": f"Capable of match-winning innings, but just as likely to fail — high risk, high reward."
+                    "Boom-or-Bust": "Capable of match-winning innings, but just as likely to fail — high risk, high reward."
                 }
                 st.markdown(
                     f"<span class='role-badge' style='background-color:{badge_color}22; color:{badge_color}; "
@@ -926,7 +955,7 @@ if mode == "Player Card":
                   help="Deliveries with zero runs conceded — higher means tighter, more pressure-building bowling.")
 
         all_bowl, recent_bowl = recent_vs_career(bowl_data, recent_n)
-        if recent_bowl is not None and not recent_bowl.empty:
+        if recent_bowl is not None and not recent_bowl.empty and recent_bowl['overs'].sum() > 0:
             recent_econ = round(recent_bowl['runs_conceded'].sum() / recent_bowl['overs'].sum(), 2)
             recent_wkts = int(recent_bowl['wickets'].sum())
             delta_econ = round(recent_econ - bowl_summary['economy'], 2)
@@ -1062,7 +1091,7 @@ if mode == "Player Card":
                 coach_lines_b = {
                     "Tight & Reliable": f"Concedes around {mean_econ} runs per over most matches — a safe bowler to trust with the ball.",
                     "Some Variance": f"Averages {mean_econ} economy overall, but has the occasional expensive night mixed in.",
-                    "Erratic": f"Economy swings wildly match to match — can be brilliant or expensive, hard to predict."
+                    "Erratic": "Economy swings wildly match to match — can be brilliant or expensive, hard to predict."
                 }
                 st.markdown(
                     f"<span class='role-badge' style='background-color:{badge_color_b}22; color:{badge_color_b}; "
